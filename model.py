@@ -26,8 +26,8 @@ class MultiHeadAttn(nn.Module):
     assert self.embedding_dim % self.head_num == 0
     self.head_dim = ctx.embedding_dim // self.head_num
 
-    self.qkv_pro = nn.Linear(ctx.embedding_dim, self.embedding_dim * 3, bias=False)
-    self.output_pro = nn.Linear(self.embedding_dim, self.embedding_dim, bias=False)
+    self.qkv_pro = nn.Linear(ctx.embedding_dim, self.embedding_dim * 3, bias=ctx.bias)
+    self.output_pro = nn.Linear(self.embedding_dim, self.embedding_dim, bias=ctx.bias)
 
     self.register_buffer("mask", torch.tril(torch.ones(self.block_size, self.block_size))
                          .view(1,1,self.block_size,self.block_size))
