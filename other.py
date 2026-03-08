@@ -6,42 +6,39 @@ import os
 
 @dataclass
 class GPTContext:
-  num_hidden_layer:int=2
-  block_size:int=10
-  embedding_dim:int=32
-  head_num:int=4
-  head_dim:int=8
-  vocab_size:int = 0
-  dropout:float=0
-  bias:bool =True
+    n_layer:int=2
+    block_size:int=10
+    embedding_dim:int=32
+    head_num:int=4
+    vocab_size:int=0
+    dropout:float=0
+    bias:bool=True
+    enable_flash:bool=True
 
+    @staticmethod
+    def to_dict(ctx):
+        config_dict = {
+            'n_layer':ctx.n_layer,
+            'block_size': ctx.block_size,
+            'embedding_dim':ctx.embedding_dim,
+            'head_num':ctx.head_num,
+            'vocab_size':ctx.vocab_size,
+            'dropout':ctx.dropout,
+            'bias':ctx.bias
+        }
+        return config_dict
 
-@staticmethod
-def to_dict(ctx):
-      config_dict = {
-          'num_hidden_layer':ctx.num_hidden_layer,
-          'block_size': ctx.block_size,
-          'embedding_size':ctx.embedding_size,
-          'head_num':ctx.head_num,
-          'head_dim':ctx.head_dim,
-          'mlp_hidden_size':ctx.mlp_hidden_size,
-          'vocab_size':ctx.vocab_size,
-          'dropout':ctx.dropout
-      }
-      return config_dict
-
-@staticmethod
-def from_dict(config_dict):
-      ctx = GPTContext()
-      ctx.block_size = config_dict['block_size']
-      ctx.embedding_size = config_dict['embedding_size']
-      ctx.head_num = config_dict['head_num']
-      ctx.head_dim = config_dict['head_dim']
-      ctx.mlp_hidden_size = config_dict['mlp_hidden_size']
-      ctx.num_hidden_layer = config_dict['num_hidden_layer']
-      ctx.vocab_size = config_dict['vocab_size']
-      ctx.dropout = config_dict['dropout']
-      return ctx
+    @staticmethod
+    def from_dict(config_dict):
+        ctx = GPTContext()
+        ctx.block_size = config_dict['block_size']
+        ctx.embedding_dim = config_dict['embedding_dim']
+        ctx.head_num = config_dict['head_num']
+        ctx.n_layer = config_dict['n_layer']
+        ctx.vocab_size = config_dict['vocab_size']
+        ctx.dropout = config_dict['dropout']
+        ctx.bias = config_dict['bias']
+        return ctx
 
 def get_batch(split, train_data,val_data,block_size,batch_size,device):
     # generate a small batch of data of inputs x and targets y

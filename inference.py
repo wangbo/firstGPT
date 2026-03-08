@@ -2,14 +2,15 @@ import os
 import torch
 from pathlib import Path
 
-from model import GPT2Model, GPTContext
+from model import GPT2Model
+from other import GPTContext
 from tokenizer import SimpleTokenizer
 
-file_name = "all"
-dict_path = "/home/wangbo/git/cn_data/" + file_name + ".dict"
+file_name = ""
+dict_path = "" + file_name + ".dict"
 
-cp_name = "all_34999_1771763513"
-cp_path = "/home/wangbo/git/firstGPT/" + cp_name
+cp_name = ""
+cp_path = "" + cp_name
 
 simple_tk = SimpleTokenizer()
 simple_tk.load_token_dict(dict_path)
@@ -37,7 +38,7 @@ def load_model_for_infer(model_class):
 model = load_model_for_infer(GPT2Model)
 model.eval()
 
-input_str = "孙行者"
+input_str = ""
 token_ids = simple_tk.encode(input_str)
-output_ids = model.generate(token_ids, 30)
+output_ids = model.generate(token_ids, 1024, simple_tk.decode)
 print(simple_tk.decode(output_ids))

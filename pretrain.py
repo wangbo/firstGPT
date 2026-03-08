@@ -3,15 +3,16 @@ import os.path
 import torch
 import torch.nn.functional as F
 import time
-from collections import deque
 import sys
 
-from model import GPT2Model, GPTContext, get_batch, estimate_loss, save_checkpoint
+from model import GPT2Model
+from other import GPTContext, get_batch, estimate_loss, save_checkpoint
 from tokenizer import SimpleTokenizer
 
+torch.manual_seed(1337)
 file_name = "all"
-file_path = "/home/wangbo/git/cn_data/" + file_name + ".txt"
-dict_path = "/home/wangbo/git/cn_data/" + file_name + ".dict"
+file_path = "" + file_name + ".txt"
+dict_path = "" + file_name + ".dict"
 
 simple_tk = SimpleTokenizer()
 simple_tk.load_token_dict(dict_path)
@@ -23,77 +24,69 @@ start_time = time.time()
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-block_size = 256
-batch_size = 32
-vocab_size = simple_tk.vocab_size
 ctx = GPTContext()
-ctx.block_size = block_size
-ctx.vocab_size = simple_tk.vocab_size
+
 cur_path = os.getcwd()
 check_point_path = cur_path + "/{}_{}_{}" # file_name,iter,timestamp
 need_checkpoint = True
 
-eval_iters = 100
-train_iters = 10000000000
-eval_interval = 500
 
-# model param
-ctx.num_hidden_layer = 4
-ctx.embedding_size = 128
-ctx.head_num = 4
-ctx.head_dim = 32
-ctx.mlp_hidden_size = 256
-# debug param
-# ctx.num_hidden_layer = 2
-# ctx.embedding_size = 256
-# ctx.head_num = 4
-# ctx.head_dim = 64
-# ctx.mlp_hidden_size = 256
+train_iters = 200
+eval_iters = 200
+eval_interval = 1000
+
+batch_size = 16
+block_size = 1024
+vocab_size = simple_tk.vocab_size
+# vocab_size = 50257
+
+ctx.block_size = block_size
+ctx.vocab_size = vocab_size
+ctx.n_layer = 12
+ctx.embedding_dim = 768
+ctx.head_num = 12
 
 model = GPT2Model(ctx)
 model.to(device)
-print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
+param_num = sum(p.numel() for p in model.parameters())
+print(f"{param_num / 1e6}M parameters, {param_num}")
 print(f"device:{device}")
+# for name,param in model.named_parameters():
+#     print(f"{name:20s}, dtype:{param.dtype}")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 iter_num = 0
 
-val_check_queue_size = 5
-val_loss_check_queue = deque()
-
 last_val_loss = sys.maxsize
 for i in range(train_iters):
   xb, yb = get_batch('train',train_data,val_data,block_size,batch_size,device)
 
-  output = model(xb)
-  output = output.view(-1, vocab_size)
-  labels = yb.view(-1)
-  loss = F.cross_entropy(output, labels)
-  if i % eval_interval == 0 or i == train_iters - 1:
-    est_loss = estimate_loss(model, eval_iters, vocab_size,train_data,val_data,block_size,batch_size,device)
-    print(f"idx:{i}, train loss:{est_loss['train']}, eval loss:{est_loss['val']}")
-    # check stop condition
-    cur_val_loss = round(est_loss['val'].item(), 2)
-    stop_flag = cur_val_loss >= last_val_loss
-    val_loss_check_queue.append(stop_flag)
-    last_val_loss = cur_val_loss
-    if len(val_loss_check_queue) > val_check_queue_size:
-        val_loss_check_queue.popleft()
-    if all(val_loss_check_queue):
-        print("meets stop condition, stop training")
-        break
-
-  if i != 0 and i % 5000 == 0:
-      final_loss = estimate_loss(model, eval_iters, vocab_size, train_data, val_data, block_size, batch_size, device)
-      save_checkpoint(check_point_path.format(file_name, str(iter_num), str(int(start_time))),
-                          model, optimizer, iter_num, final_loss['train'], final_loss['val'],
-                          GPTContext.to_dict(ctx))
+  t0 = time.time()
+  with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+      output = model(xb)
+      loss = F.cross_entropy(output.view(-1, vocab_size),  yb.view(-1))
 
   optimizer.zero_grad(set_to_none=True)
   loss.backward()
   optimizer.step()
   iter_num = i
+  t1 = time.time()
+
+  allocated = torch.cuda.max_memory_allocated() / (1024 ** 3)
+  reserved = torch.cuda.max_memory_reserved() / (1024 ** 3)
+  print(f"idx:{i}, train loss {loss.item()}, time {(t1 - t0)*1000:.2f}ms, allocated:{allocated}"
+        f",reserved:{reserved}")
+
+  if (i != 0 and i % eval_interval == 0) or i == train_iters - 1:
+    est_loss = estimate_loss(model, eval_iters, vocab_size,train_data,val_data,block_size,batch_size,device)
+    print(f"idx:{i}, train loss:{est_loss['train']}, eval loss:{est_loss['val']}")
+
+  # if i != 0 and i % 2500 == 0:
+  #     final_loss = estimate_loss(model, eval_iters, vocab_size, train_data, val_data, block_size, batch_size, device)
+  #     save_checkpoint(check_point_path.format(file_name, str(iter_num), str(int(start_time))),
+  #                         model, optimizer, iter_num, final_loss['train'], final_loss['val'],
+  #                         GPTContext.to_dict(ctx))
 
 final_loss = estimate_loss(model, eval_iters, vocab_size,train_data,val_data,block_size,batch_size,device)
 
@@ -102,7 +95,7 @@ if need_checkpoint:
                     model, optimizer, iter_num, final_loss['train'], final_loss['val'],
                     GPTContext.to_dict(ctx))
 
-input_str = "行者"
+input_str = ""
 model.eval()
 print("begin eval")
 token_ids = simple_tk.encode(input_str)
@@ -111,4 +104,4 @@ print(simple_tk.decode(output_ids))
 
 end_time = time.time()
 elapsed_time = end_time - start_time
-print(f"代码执行耗时：{elapsed_time:.4f} 秒")
+print(f"time cost：{elapsed_time:.4f} second")
