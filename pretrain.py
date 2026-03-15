@@ -3,42 +3,43 @@ import os.path
 import torch
 import torch.nn.functional as F
 import time
-import sys
 
+from dataloader import SimpleDataloader
 from model import GPT2Model
-from other import GPTContext, get_batch, estimate_loss, save_checkpoint
+from other import GPTContext
 from tokenizer import SimpleTokenizer
 
 torch.manual_seed(1337)
 file_name = "all"
-file_path = "" + file_name + ".txt"
+file_path = ""
 dict_path = "" + file_name + ".dict"
 
+train_iters = 5000
+eval_iters = 5000
+eval_interval = 1
+
+batch_size = 4
+block_size = 1024
+vocab_size = 50257
+grad_clip = 1.0
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+simple_data_loader = SimpleDataloader(dict_path, file_path, batch_size,block_size, device)
+
 simple_tk = SimpleTokenizer()
-simple_tk.load_token_dict(dict_path)
-train_data, val_data = simple_tk.load_data(file_path)
-print(f"vocab size:{simple_tk.vocab_size}, total token:{simple_tk.total_token_num}")
+simple_tk.load_vocab(dict_path)
+
+simple_data_loader.initialize()
+print(f"vocab size:{simple_tk.vocab_size}, total token:{simple_data_loader.total_token_num}")
 
 start_time = time.time()
-# learning_rate = 3e-4
 learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 ctx = GPTContext()
 
 cur_path = os.getcwd()
 check_point_path = cur_path + "/{}_{}_{}" # file_name,iter,timestamp
 need_checkpoint = True
-
-
-train_iters = 200
-eval_iters = 200
-eval_interval = 1000
-
-batch_size = 16
-block_size = 1024
-vocab_size = simple_tk.vocab_size
-# vocab_size = 50257
 
 ctx.block_size = block_size
 ctx.vocab_size = vocab_size
@@ -51,57 +52,48 @@ model.to(device)
 param_num = sum(p.numel() for p in model.parameters())
 print(f"{param_num / 1e6}M parameters, {param_num}")
 print(f"device:{device}")
-# for name,param in model.named_parameters():
-#     print(f"{name:20s}, dtype:{param.dtype}")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-iter_num = 0
+# mode="reduce-overhead" ? fullgraph?
+# model = torch.compile(model,fullgraph=True)
 
-last_val_loss = sys.maxsize
+# global_batch_size = 524288
+global_batch_size = 65536
+micro_batch_size = batch_size * block_size
+grad_accu_num = global_batch_size // (micro_batch_size)
+print(f"global batch size:{global_batch_size}, micro batch size:{micro_batch_size}, grad accu num:{grad_accu_num}")
+
 for i in range(train_iters):
-  xb, yb = get_batch('train',train_data,val_data,block_size,batch_size,device)
-
   t0 = time.time()
-  with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-      output = model(xb)
-      loss = F.cross_entropy(output.view(-1, vocab_size),  yb.view(-1))
-
   optimizer.zero_grad(set_to_none=True)
-  loss.backward()
+
+  acc_loss = 0
+  token_num = 0
+  for j in range(grad_accu_num):
+      train_data = simple_data_loader.next_batch()
+      xb = train_data[0].to(device)
+      yb = train_data[1].to(device)
+      token_num += xb.numel()
+
+      with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+          output = model(xb)
+          loss = F.cross_entropy(output.view(-1, vocab_size),  yb.view(-1))
+      loss = loss / grad_accu_num
+      acc_loss += loss.detach().item()
+      loss.backward()
+
+  if grad_clip != 0:
+    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
   optimizer.step()
-  iter_num = i
-  t1 = time.time()
 
   allocated = torch.cuda.max_memory_allocated() / (1024 ** 3)
   reserved = torch.cuda.max_memory_reserved() / (1024 ** 3)
-  print(f"idx:{i}, train loss {loss.item()}, time {(t1 - t0)*1000:.2f}ms, allocated:{allocated}"
-        f",reserved:{reserved}")
+  torch.cuda.reset_peak_memory_stats()
 
-  if (i != 0 and i % eval_interval == 0) or i == train_iters - 1:
-    est_loss = estimate_loss(model, eval_iters, vocab_size,train_data,val_data,block_size,batch_size,device)
-    print(f"idx:{i}, train loss:{est_loss['train']}, eval loss:{est_loss['val']}")
-
-  # if i != 0 and i % 2500 == 0:
-  #     final_loss = estimate_loss(model, eval_iters, vocab_size, train_data, val_data, block_size, batch_size, device)
-  #     save_checkpoint(check_point_path.format(file_name, str(iter_num), str(int(start_time))),
-  #                         model, optimizer, iter_num, final_loss['train'], final_loss['val'],
-  #                         GPTContext.to_dict(ctx))
-
-final_loss = estimate_loss(model, eval_iters, vocab_size,train_data,val_data,block_size,batch_size,device)
-
-if need_checkpoint:
-    save_checkpoint(check_point_path.format(file_name, str(int(start_time)), str(iter_num)),
-                    model, optimizer, iter_num, final_loss['train'], final_loss['val'],
-                    GPTContext.to_dict(ctx))
-
-input_str = ""
-model.eval()
-print("begin eval")
-token_ids = simple_tk.encode(input_str)
-output_ids = model.generate(token_ids,block_size)
-print(simple_tk.decode(output_ids))
-
-end_time = time.time()
-elapsed_time = end_time - start_time
-print(f"time cost：{elapsed_time:.4f} second")
+  torch.cuda.synchronize()
+  t4 = time.time()
+  tokens_per_second = token_num / (t4 - t0)
+  print(f"idx:{i}, train loss {acc_loss}, time {(t4 - t0)*1000:.2f}ms, allocated:{allocated:.2f}"
+            f",reserved:{reserved:.2f},"
+            f"tokens per sec:{tokens_per_second:.2f}")

@@ -40,15 +40,6 @@ class GPTContext:
         ctx.bias = config_dict['bias']
         return ctx
 
-def get_batch(split, train_data,val_data,block_size,batch_size,device):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
-
 
 def save_checkpoint(cp_path, model, optimizer, epoch, train_loss, eval_loss
                     ,config_dict):
@@ -79,23 +70,3 @@ def load_checkpoint(cp_path, model, optimizer, device):
 
     print(f"load checkpoint from {cp_path}, train loss:{train_loss}, eval loss:{eval_loss}")
     return epoch
-
-
-@torch.no_grad()
-def estimate_loss(model, eval_iters, vocab_size,train_data,val_data,block_size,batch_size,device):
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split,train_data,val_data,block_size,batch_size,device)
-            logits = model(X)
-
-            logits = logits.view(-1, vocab_size)
-            labels = Y.view(-1)
-            loss = F.cross_entropy(logits, labels)
-
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
