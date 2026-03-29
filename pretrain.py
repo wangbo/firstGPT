@@ -8,13 +8,13 @@ from dataloader import SimpleDataloader
 from model import GPT2Model
 from other import GPTContext
 from tokenizer import SimpleTokenizer
+import math
 
 torch.manual_seed(1337)
-file_name = "all"
+file_name = ""
 file_path = ""
-dict_path = "" + file_name + ".dict"
+dict_path = ""
 
-train_iters = 5000
 eval_iters = 5000
 eval_interval = 1
 
@@ -33,7 +33,6 @@ simple_data_loader.initialize()
 print(f"vocab size:{simple_tk.vocab_size}, total token:{simple_data_loader.total_token_num}")
 
 start_time = time.time()
-learning_rate = 3e-4
 
 ctx = GPTContext()
 
@@ -53,7 +52,32 @@ param_num = sum(p.numel() for p in model.parameters())
 print(f"{param_num / 1e6}M parameters, {param_num}")
 print(f"device:{device}")
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+## 1 dynamic learn rate
+## 2 beta1 beta2
+## 3 weight decay
+## 4 warm up
+max_lr=6e-4
+# 5000 and 0.3 is just for debug, need rethinking later
+total_steps = 5000
+warmup_steps = total_steps * 0.3
+
+
+def get_lr(step, warmup_steps, total_steps, lr_max):
+    if step < warmup_steps:
+        return lr_max * step / warmup_steps
+
+    step = min(step, total_steps)
+
+    progress = (step - warmup_steps) / (total_steps - warmup_steps)
+    lr_min = 0.1 * lr_max
+
+    return lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * progress))
+
+optimizer = torch.optim.AdamW(model.parameters(),
+    lr=max_lr,
+    betas=(0.9, 0.95),
+    eps=1e-8,
+    weight_decay=0.1) #todo: only sett weight decay for two dimension params
 
 # mode="reduce-overhead" ? fullgraph?
 # model = torch.compile(model,fullgraph=True)
@@ -64,8 +88,13 @@ micro_batch_size = batch_size * block_size
 grad_accu_num = global_batch_size // (micro_batch_size)
 print(f"global batch size:{global_batch_size}, micro batch size:{micro_batch_size}, grad accu num:{grad_accu_num}")
 
-for i in range(train_iters):
+for i in range(total_steps):
   t0 = time.time()
+  lr = get_lr(i + 1, warmup_steps, total_steps, max_lr)
+
+  for param_group in optimizer.param_groups:
+      param_group["lr"] = lr
+
   optimizer.zero_grad(set_to_none=True)
 
   acc_loss = 0
