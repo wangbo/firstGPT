@@ -1,47 +1,50 @@
-from tokenizer import SimpleTokenizer
 import torch
-import pickle
+from transformers import GPT2TokenizerFast
+import numpy as np
 
 
 class SimpleDataloader(object):
 
-    def __init__(self, dict_path, data_path, batch_size, block_size, device = "cpu"):
-        self.dict_path = dict_path
-        self.data_path = data_path
+    def __init__(self, token_arr, start_idx, end_idx,
+                 batch_size, block_size):
+        assert start_idx >= 0
+        assert start_idx < end_idx
+        self.start_idx = start_idx
+        self.end_idx = end_idx
+        self.token_arr = token_arr
+        assert self.end_idx < len(self.token_arr)
+
         self.batch_size = batch_size
         self.block_size = block_size
-
-        self.offset = 0
         self.step = batch_size * block_size
-        self.token_array = None
-        self.device = device
-
-    def initialize(self):
-        with open(self.data_path, "rb") as f:
-            self.token_array = torch.tensor(pickle.load(f))
-        self.total_token_num = len(self.token_array)
 
     def next_batch(self):
-        if self.offset >= len(self.token_array):
-            return None
-        train_data = self.token_array[self.offset: self.offset + self.step].view(self.batch_size, self.block_size)
-        labels = self.token_array[self.offset + 1 : self.offset + self.step + 1].view(self.batch_size, self.block_size)
-        self.offset += self.step
-        return train_data,labels
+        np_x = self.token_arr[self.start_idx : self.start_idx + self.step].astype(np.int64)
+        np_y = self.token_arr[self.start_idx + 1 : self.start_idx + self.step + 1].astype(np.int64)
 
-    def reset_offset(self):
-        self.offset = 0
+        x = torch.from_numpy(np_x).view(self.batch_size, self.block_size)
+        y = torch.from_numpy(np_y).view(self.batch_size, self.block_size)
+        self.start_idx += self.step
+        return x, y
 
+    def total_token_num(self):
+        return self.end_idx - self.start_idx + 1
+
+    def reset_start_idx(self):
+        self.start_idx = 0
 
 if __name__ == "__main__":
-    dict_path = ""
+    tokenizer = GPT2TokenizerFast.from_pretrained("gpt2", local_files_only=True)
+    print(tokenizer.vocab_size)
     data_path = ""
-    micro_size = 8
+    batch_size = 8
     block_size = 1024
 
-    sd_loader = SimpleDataloader(dict_path, data_path, micro_size, block_size)
-    sd_loader.initialize()
-
-    tdata, labels = sd_loader.next_batch()
-    print(tdata.shape == labels.shape)
-    print(tdata[:, 1:1024] == labels[:, 0:1023])
+    # data_loader = SimpleDataloader(data_path, batch_size, block_size)
+    # x,y = data_loader.next_batch()
+    # print(x.shape)
+    # print(y.shape)
+    # global_batch_size = 65536
+    # total_token_num = data_loader.total_token_num() // global_batch_size * global_batch_size
+    # print(data_loader.total_token_num())
+    # print(total_token_num)

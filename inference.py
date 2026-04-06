@@ -3,7 +3,7 @@ import torch
 from pathlib import Path
 
 from model import GPT2Model
-from other import GPTContext
+from checkpoint import GPTContext
 from tokenizer import SimpleTokenizer
 
 file_name = ""
