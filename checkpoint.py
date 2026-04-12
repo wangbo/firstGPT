@@ -1,7 +1,8 @@
+
 import torch
 import torch.nn.functional as F
 from dataclasses import dataclass
-
+import time
 import os
 
 @dataclass
@@ -31,30 +32,36 @@ class GPTContext:
     @staticmethod
     def from_dict(config_dict):
         ctx = GPTContext()
+        ctx.n_layer = config_dict['n_layer']
         ctx.block_size = config_dict['block_size']
         ctx.embedding_dim = config_dict['embedding_dim']
         ctx.head_num = config_dict['head_num']
-        ctx.n_layer = config_dict['n_layer']
         ctx.vocab_size = config_dict['vocab_size']
         ctx.dropout = config_dict['dropout']
         ctx.bias = config_dict['bias']
         return ctx
 
 
-def save_checkpoint(cp_path, model, optimizer, epoch, train_loss, eval_loss
-                    ,config_dict):
-    os.makedirs(os.path.dirname(cp_path), exist_ok=True)
+def save_checkpoint(step, ckpt_path, model, optimizer, train_loss,config_dict):
+    if not os.path.isdir(ckpt_path):
+        raise FileNotFoundError(f"Directory does not exist: {ckpt_path}")
+
+    file_name = "{}_time_{}.pt".format(step, int(time.time()))
+    full_path = os.path.join(ckpt_path, file_name)
+
+    if os.path.exists(full_path):
+        raise FileExistsError(f"File already exists: {full_path}")
+
     check_point = {
-        'epoch':epoch,
-        'model_state':model.state_dict(),
+        'epoch':step,
+        'model_state':model._orig_mod.state_dict(),
         'optimizer_state':optimizer.state_dict(),
         'train_loss': train_loss,
-        'eval_loss':eval_loss,
         'ctx_dict':config_dict
     }
 
-    torch.save(check_point, cp_path)
-    print(f"save checkpoint in {cp_path}")
+    torch.save(check_point, full_path)
+    print(f"save checkpoint in {full_path}")
 
 def load_checkpoint(cp_path, model, optimizer, device):
     if not os.path.exists(cp_path):

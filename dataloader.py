@@ -27,7 +27,7 @@ class SimpleDataloader(object):
         self.start_idx += self.step
         return x, y
 
-    def total_token_num(self):
+    def token_num(self):
         return self.end_idx - self.start_idx + 1
 
     def reset_start_idx(self):
@@ -36,15 +36,3 @@ class SimpleDataloader(object):
 if __name__ == "__main__":
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2", local_files_only=True)
     print(tokenizer.vocab_size)
-    data_path = ""
-    batch_size = 8
-    block_size = 1024
-
-    # data_loader = SimpleDataloader(data_path, batch_size, block_size)
-    # x,y = data_loader.next_batch()
-    # print(x.shape)
-    # print(y.shape)
-    # global_batch_size = 65536
-    # total_token_num = data_loader.total_token_num() // global_batch_size * global_batch_size
-    # print(data_loader.total_token_num())
-    # print(total_token_num)

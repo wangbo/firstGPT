@@ -9,57 +9,82 @@ import math
 
 from dataloader import SimpleDataloader
 from model import GPT2Model
-from checkpoint import GPTContext
+from checkpoint import GPTContext, save_checkpoint
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
 torch.manual_seed(1337)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-data_path = ""
-tk_arr = np.memmap(data_path, dtype=np.uint16, mode='r')
-total_tk_num = len(tk_arr)
+data_path = "../fineweb10t/sample/2.5B_tokens/2.5B_tokens.bin"
+check_point_path = "./checkpoint"
+origin_token_arr = np.memmap(data_path, dtype=np.uint16, mode='r')
+origin_token_num = len(origin_token_arr)
+tokenizer = GPT2TokenizerFast.from_pretrained("gpt2", local_files_only=True)
+vocab_size = tokenizer.vocab_size
+logging.info(f"origin total token num:{origin_token_num}, vocab_size:{vocab_size}")
 
+# args
+checkpoint_interval = 5000
+eval_interval_step = 300
+warmup_steps = 200
 batch_size = 4
 block_size = 1024
+global_batch_size = 65536 # set global_batch_size to 524288 is too big for single gpu training
+micro_batch_token_num = batch_size * block_size
+grad_accu_num = global_batch_size // micro_batch_token_num
+logging.info(f"global batch size:{global_batch_size}, "
+      f"micro batch size:{micro_batch_token_num}, "
+      f"grad accu num:{grad_accu_num},"
+      f"warmup steps:{warmup_steps}")
 
 eval_tokens = 1024 * 1024
 eval_batch_size = 4
-eval_interval_step = 5 # 300
-eval_iters = (eval_tokens // (eval_batch_size * block_size)) - 1
+eval_iters = (eval_tokens // (eval_batch_size * block_size))
+eval_data_end_idx = origin_token_num - 1 - 1
+eval_data_start_idx = eval_data_end_idx - eval_tokens + 1
+val_data_loader = SimpleDataloader(origin_token_arr,eval_data_start_idx,eval_data_end_idx,eval_batch_size,block_size)
+logging.info(f"val tokens:{val_data_loader.token_num()}, "
+      f"val loader begin index:{eval_data_start_idx}, "
+      f"val loader end index:{eval_data_end_idx},")
 
 train_data_start_idx = 0
-train_data_end_idx = total_tk_num - eval_tokens - 20
-eval_data_start_idx = train_data_end_idx + 10
-eval_data_end_idx = eval_data_start_idx + eval_tokens - 1
-
-tokenizer = GPT2TokenizerFast.from_pretrained("gpt2", local_files_only=True)
-train_data_loader = SimpleDataloader(tk_arr,train_data_start_idx,train_data_end_idx,batch_size,block_size)
-val_data_loader = SimpleDataloader(tk_arr,eval_data_start_idx,eval_data_end_idx,eval_batch_size,block_size)
-print("total tokens:{}".format(total_tk_num))
-print(f"total val tokens:{eval_tokens}, "
-      f"eval_batch:{eval_batch_size * block_size},"
-      f"eval iters:{eval_iters},"
-      f"eval start idx:{eval_data_start_idx},"
-      f"eval end idx:{eval_data_end_idx}")
-vocab_size = tokenizer.vocab_size
+train_data_end_idx = eval_data_start_idx - 1 - 1
+train_token_num = (train_data_end_idx - train_data_start_idx + 1)
+total_steps = train_token_num // global_batch_size
+train_token_num = total_steps * global_batch_size
+train_data_end_idx = train_data_start_idx + train_token_num - 1
+train_data_loader = SimpleDataloader(origin_token_arr,train_data_start_idx,train_data_end_idx,batch_size,block_size)
+logging.info(f"total steps:{total_steps},"
+      f"train token:{train_data_loader.token_num()},"
+      f"train loader begin index:{train_data_start_idx},"
+      f"train loader end index:{train_data_end_idx}")
 
 start_time = time.time()
+grad_clip = 1.0
+max_lr=6e-4
+min_lr = max_lr * 0.1
+weight_decay = 0.1
 
 ctx = GPTContext()
-cur_path = os.getcwd()
-check_point_path = cur_path + "/{}_{}_{}" # file_name,iter,timestamp
-need_checkpoint = True
-
 ctx.block_size = block_size
-ctx.vocab_size = vocab_size
-ctx.n_layer = 12
 ctx.embedding_dim = 768
 ctx.head_num = 12
+ctx.n_layer = 12
+ctx.vocab_size = vocab_size
+ctx.dropout = 0.1
+ctx.bias = False
 
 model = GPT2Model(ctx)
 model.to(device)
 param_num = sum(p.numel() for p in model.parameters())
-print(f"{param_num / 1e6}M parameters")
-print(f"device:{device}")
+logging.info(f"{param_num / 1e6}M parameters")
+logging.info(f"device:{device}")
 
 def get_lr(step, warmup_steps, total_steps, lr_max):
     if step < warmup_steps:
@@ -110,26 +135,11 @@ def estimate_val_loss(model, data_loader, eval_iters):
 
 # mode="reduce-overhead" ? fullgraph?
 model = torch.compile(model,fullgraph=True)
-
-# set global_batch_size to 524288 is too big for one gpu training
-global_batch_size = 65536
-total_train_token_num = train_data_loader.total_token_num() // global_batch_size * global_batch_size
-print(f"vocab size:{vocab_size}, total train token:{total_train_token_num}")
-
-micro_batch_size = batch_size * block_size
-grad_accu_num = global_batch_size // micro_batch_size
-print(f"global batch size:{global_batch_size}, micro batch size:{micro_batch_size}, grad accu num:{grad_accu_num}")
-
-grad_clip = 1.0
-max_lr=6e-4
-min_lr = max_lr * 0.1
-weight_decay = 0.1
-
-total_steps = total_train_token_num // global_batch_size
-warmup_steps = 200
-print(f"total steps:{total_steps}, warmup steps:{warmup_steps}")
-
 optimizer = configure_optimizer(model, min_lr, weight_decay)
+
+# debug arg
+# checkpoint_interval = 500
+# eval_interval_step = 300
 
 stop_flag = False
 for i in range(total_steps):
@@ -172,7 +182,7 @@ for i in range(total_steps):
   t4 = time.time()
   tokens_per_second = token_num / (t4 - t0)
 
-  print(f"step:{i}/{total_steps}({i / total_steps * 100:.2f}%),"
+  logging.info(f"step:{i}/{total_steps}({i / total_steps * 100:.2f}%),"
         f"train loss:{acc_loss},"
         f"lr:{lr:.2e},"
         f"g_norm:{grad_norm.item():.4f},"
@@ -182,7 +192,12 @@ for i in range(total_steps):
         f"tps:{tokens_per_second:.2f}")
   if i != 0 and i % eval_interval_step == 0:
       val_loss = estimate_val_loss(model, val_data_loader, eval_iters)
-      print(
+      logging.info(
         f"step:{i}/{total_steps}({i / total_steps * 100:.2f}%),"
         f"train loss:{acc_loss},"
         f"val loss:{val_loss}")
+  if i != 0 and i % checkpoint_interval == 0:
+      save_checkpoint(i, check_point_path, model, optimizer, acc_loss, GPTContext.to_dict(ctx))
+
+
+save_checkpoint(total_steps, check_point_path, model, optimizer, acc_loss, GPTContext.to_dict(ctx))

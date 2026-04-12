@@ -28,8 +28,8 @@ if os.path.exists(output_file_name):
 else:
     print(f"file not exists, create it: {output_file_name}")
 
-token_limit = 2_500_000_000
-# token_limit = 100000
+# token_limit = 2_500_000_000
+token_limit = 100000000
 text_column_name = "text"
 read_parquet_batch_size = 1024
 eos_id = tokenizer.eos_token_id

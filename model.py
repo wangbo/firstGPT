@@ -128,19 +128,9 @@ class GPT2Model(nn.Module):
     output = self.lm_head(hidden_state)
     return output
 
-  def generate(self, token_ids, max_length, decode=None):
-    token_ids = torch.tensor(token_ids)
-    token_ids = token_ids.reshape(1, *token_ids.shape)
-
-    if decode != None:
-      print(decode(token_ids[0].tolist()), end="")
-    while len(token_ids[0]) < max_length:
+  def next_token(self, token_ids):
       output = self.forward(token_ids)
       output = F.softmax(output, dim=-1)
-
       new_token_id = torch.multinomial(output[0][-1], num_samples=1, replacement=False)
-      if decode != None:
-        print(decode([new_token_id.item()]), end="")
-      new_token_id = torch.tensor([[new_token_id]])
-      token_ids = torch.cat((token_ids, new_token_id), dim=-1)
-    return token_ids[0].tolist()
+      return new_token_id
+
