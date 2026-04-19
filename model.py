@@ -128,9 +128,4 @@ class GPT2Model(nn.Module):
     output = self.lm_head(hidden_state)
     return output
 
-  def next_token(self, token_ids):
-      output = self.forward(token_ids)
-      output = F.softmax(output, dim=-1)
-      new_token_id = torch.multinomial(output[0][-1], num_samples=1, replacement=False)
-      return new_token_id
 

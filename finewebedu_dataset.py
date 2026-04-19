@@ -4,6 +4,14 @@ from huggingface_hub import snapshot_download
 import pyarrow.parquet as pq
 from transformers import GPT2TokenizerFast
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
 # snapshot_download(
 #     repo_id="HuggingFaceFW/fineweb-edu",
@@ -13,84 +21,110 @@ import os
 #     max_workers=1
 # )
 
-# file_name = ""
-output_file_name = ""
-
 data_dir = ""
+output_dir = ""
 file_list = [f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))]
 file_list.sort()
 
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2",local_files_only=True)
 
-if os.path.exists(output_file_name):
-    os.remove(output_file_name)
-    print(f"file already exists, drop it: {output_file_name}")
-else:
-    print(f"file not exists, create it: {output_file_name}")
+# if os.path.exists(output_file_name):
+#     os.remove(output_file_name)
+#     logging.info(f"file already exists, drop it: {output_file_name}")
+# else:
+#     logging.info(f"file not exists, create it: {output_file_name}")
 
 # token_limit = 2_500_000_000
 token_limit = 100000000
 text_column_name = "text"
 read_parquet_batch_size = 1024
 eos_id = tokenizer.eos_token_id
-buffer_tokens = 100 * 1024 * 1024 # 600M bytes
+buffer_limit_bytes = 100 * 1024 * 1024 * 1 # 100M
 dtype = np.uint16
 
-# audit
-batch_count = 0
-text_count = 0
-token_count = 0
-
-token_buffer = []
-
-def flush_buffer(f):
+def flush_buffer(f, token_buffer):
     buf_len = len(token_buffer)
     if buf_len == 0:
         return
     arr = np.asarray(token_buffer, dtype=dtype)
     arr.tofile(f)
     token_buffer.clear()
-    print(f"flush buffer: token count:{buf_len}, total token count:{token_count}")
 
-stop_flag = False
-with open(output_file_name, "wb") as f:
-    for file_name in file_list:
-        if stop_flag:
-            break
-        data_path = os.path.join(data_dir, file_name)
-        pf = pq.ParquetFile(data_path)
-        total_row_groups = pf.num_row_groups
-        print(f"read file: {file_name}, "
-              f"token count: {token_count}, "
-              f"token progress:{token_count / token_limit * 100:.2f}% ")
+def exec_encode(idx, input_file_path, output_file_path, output_file_name,check_data=False):
+    logging.info(f"begin idx={idx},f_name={output_file_name}")
+    # audit
+    token_count = 0
+    total_ufffd_count = 0
+    token_buffer = []
+    total_text_count = 0
+    ufffd_text_count = 0
+    with open(output_file_path, "wb") as f:
+        pf = pq.ParquetFile(input_file_path)
         for rg_idx in range(pf.num_row_groups):
-            print(f"process: {rg_idx}/{total_row_groups}, "
-                  f"token count: {token_count}, "
-                  f"token progress:{token_count/token_limit * 100:.2f}% ")
-
-            if token_count > token_limit:
-                stop_flag = True
-                break
-
             for batch in pf.iter_batches(
                 row_groups=[rg_idx],
                 batch_size=read_parquet_batch_size,
                 columns=[text_column_name],
             ):
-                batch_count += 1
                 texts = batch.column(text_column_name)
                 for i in range(len(texts)):
-                    text_count += 1
                     text = texts[i].as_py()
+                    total_text_count += 1
+
+                    ufffd_count = text.count('\ufffd')
+                    total_ufffd_count += ufffd_count
+
+                    if check_data:
+                        token_count += len(text)
+                        if ufffd_count > 0:
+                            ufffd_text_count += 1
+                        continue
+
+                    if ufffd_count > 0:
+                        ufffd_text_count += 1
+                        ratio = ufffd_count / len(text)
+                        if ratio > 0.001:
+                            continue
+                        else:
+                            text = text.replace('\ufffd', '')
                     text_token_ids = tokenizer.encode(text)
                     text_token_ids.append(eos_id)
 
                     token_count += len(text_token_ids)
                     token_buffer.extend(text_token_ids)
+                    buf_bytes = len(token_buffer) * 2
 
-                    if len(token_buffer) >= buffer_tokens:
-                        flush_buffer(f)
-    flush_buffer(f)
+                    if buf_bytes > buffer_limit_bytes:
+                        logging.info(f"idx={idx} flush,token_count={token_count},"
+                                     f"ufffd_count={total_ufffd_count},"
+                                     f"ufd_rate={total_ufffd_count/token_count/100:.2f}%")
+                        flush_buffer(f,token_buffer)
+                    # logging.info(f"idx={idx},token_count={token_count},"
+                    #              f"buf_bytes={buf_bytes},"
+                    #              f"buf_limit={buffer_limit_bytes}")
+        flush_buffer(f,token_buffer)
+    logging.info(f"finished idx={idx},f_name={output_file_name},"
+                 f"token_count={token_count},"
+                 f"ufffd_count={total_ufffd_count},"
+                 f"total_text_count={total_text_count},"
+                 f"ufffd_text_count={ufffd_text_count},"
+                 f"ufd_rate={total_ufffd_count / token_count / 100:.2f}%")
 
-print(f"final audit: total token count:{token_count}, batch count:{batch_count} , text count:{text_count}.")
+with ThreadPoolExecutor(max_workers=1) as executor:
+    futures = {}
+    for idx, input_file_name in enumerate(file_list):
+        input_file_path = os.path.join(data_dir, input_file_name)
+
+        output_file_name = f"{input_file_name.split(".")[0]}.bin"
+        output_file_path = os.path.join(output_dir, output_file_name)
+
+        future = executor.submit(exec_encode, idx, input_file_path, output_file_path, output_file_name)
+        futures[future] = output_file_name
+
+    for future in as_completed(futures):
+        output_file_name = futures[future]
+        try:
+            future.result()
+        except Exception as e:
+            print(f"{output_file_name} failed: {e}")
 
