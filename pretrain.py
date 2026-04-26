@@ -1,5 +1,3 @@
-import os.path
-
 import torch
 import torch.nn.functional as F
 import time
@@ -21,8 +19,10 @@ logging.basicConfig(
 torch.manual_seed(1337)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-data_path = "../fineweb10t/sample/2.5B_tokens/2.5B_tokens.bin"
-check_point_path = "./checkpoint"
+# data_path = "../fineweb10t/sample/2.5B_tokens/2.5B_tokens.bin"
+# data_path = "../fineweb10t/sample/10B.bin"
+data_path = "../fineweb10t/sample/100TToken/013_00000.bin" # test bin
+check_point_path = "./checkpoint/0425"
 origin_token_arr = np.memmap(data_path, dtype=np.uint16, mode='r')
 origin_token_num = len(origin_token_arr)
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2", local_files_only=True)
@@ -30,38 +30,39 @@ vocab_size = tokenizer.vocab_size
 logging.info(f"origin total token num:{origin_token_num}, vocab_size:{vocab_size}")
 
 # args
-checkpoint_interval = 5000
-eval_interval_step = 300
-warmup_steps = 200
+checkpoint_interval = 1000
+eval_interval_step = 500
+warmup_steps = 1000
 batch_size = 4
 block_size = 1024
-global_batch_size = 65536 # set global_batch_size to 524288 is too big for single gpu training
+global_batch_tokens = 524288 # todo:rethinking batch size
 micro_batch_token_num = batch_size * block_size
-grad_accu_num = global_batch_size // micro_batch_token_num
-logging.info(f"global batch size:{global_batch_size}, "
+grad_accu_num = global_batch_tokens // micro_batch_token_num
+logging.info(f"global batch size:{global_batch_tokens}, "
       f"micro batch size:{micro_batch_token_num}, "
       f"grad accu num:{grad_accu_num},"
       f"warmup steps:{warmup_steps}")
 
+# todo: refactor dataloader
 eval_tokens = 1024 * 1024
 eval_batch_size = 4
 eval_iters = (eval_tokens // (eval_batch_size * block_size))
 eval_data_end_idx = origin_token_num - 1 - 1
 eval_data_start_idx = eval_data_end_idx - eval_tokens + 1
 val_data_loader = SimpleDataloader(origin_token_arr,eval_data_start_idx,eval_data_end_idx,eval_batch_size,block_size)
-logging.info(f"val tokens:{val_data_loader.token_num()}, "
+logging.info(f"val tokens:{val_data_loader.token_count()}, "
       f"val loader begin index:{eval_data_start_idx}, "
       f"val loader end index:{eval_data_end_idx},")
 
 train_data_start_idx = 0
 train_data_end_idx = eval_data_start_idx - 1 - 1
 train_token_num = (train_data_end_idx - train_data_start_idx + 1)
-total_steps = train_token_num // global_batch_size
-train_token_num = total_steps * global_batch_size
+total_steps = train_token_num // global_batch_tokens
+train_token_num = total_steps * global_batch_tokens
 train_data_end_idx = train_data_start_idx + train_token_num - 1
 train_data_loader = SimpleDataloader(origin_token_arr,train_data_start_idx,train_data_end_idx,batch_size,block_size)
 logging.info(f"total steps:{total_steps},"
-      f"train token:{train_data_loader.token_num()},"
+      f"train token:{train_data_loader.token_count()},"
       f"train loader begin index:{train_data_start_idx},"
       f"train loader end index:{train_data_end_idx}")
 
@@ -80,21 +81,18 @@ ctx.vocab_size = vocab_size
 ctx.dropout = 0.1
 ctx.bias = False
 
-model = GPT2Model(ctx)
-model.to(device)
-param_num = sum(p.numel() for p in model.parameters())
+raw_model = GPT2Model(ctx).to(device)
+
+param_num = sum(p.numel() for p in raw_model.parameters())
 logging.info(f"{param_num / 1e6}M parameters")
 logging.info(f"device:{device}")
 
 def get_lr(step, warmup_steps, total_steps, lr_max):
     if step < warmup_steps:
         return lr_max * step / warmup_steps
-
     if step > total_steps:
-        return min_lr;
-
+        return min_lr
     progress = (step - warmup_steps) / (total_steps - warmup_steps)
-
     return min_lr + 0.5 * (lr_max - min_lr) * (1 + math.cos(math.pi * progress))
 
 def configure_optimizer(model, lr, weight_decay, betas=(0.9, 0.95), eps=1e-8):
@@ -124,7 +122,7 @@ def estimate_val_loss(model, data_loader, eval_iters):
         val_data = data_loader.next_batch()
         x = val_data[0].to(device)
         y = val_data[1].to(device)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
             output = model(x)
             loss = F.cross_entropy(output.view(-1, vocab_size), y.view(-1))
         losses[i] = loss.item()
@@ -133,19 +131,17 @@ def estimate_val_loss(model, data_loader, eval_iters):
     data_loader.reset_start_idx()
     return losses.mean().item()
 
+
+optimizer = configure_optimizer(raw_model, min_lr, weight_decay)
 # mode="reduce-overhead" ? fullgraph?
-model = torch.compile(model,fullgraph=True)
-optimizer = configure_optimizer(model, min_lr, weight_decay)
+model = torch.compile(raw_model,fullgraph=True)
+
 
 # debug arg
 # checkpoint_interval = 500
 # eval_interval_step = 300
-
-stop_flag = False
+grad_norm = torch.tensor(0.0)
 for i in range(total_steps):
-  if stop_flag:
-      break
-
   t0 = time.time()
   lr = get_lr(i + 1, warmup_steps, total_steps, max_lr)
 
@@ -157,29 +153,25 @@ for i in range(total_steps):
   token_num = 0
   for j in range(grad_accu_num):
       train_data = train_data_loader.next_batch()
-      if train_data is None:
-          stop_flag = True
-          break
       xb = train_data[0].to(device)
       yb = train_data[1].to(device)
       token_num += xb.numel()
 
-      with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+      with torch.autocast(device_type=device, dtype=torch.bfloat16):
           output = model(xb)
           loss = F.cross_entropy(output.view(-1, vocab_size),  yb.view(-1))
       loss = loss / grad_accu_num
       acc_loss += loss.detach().item()
       loss.backward()
   if grad_clip != 0:
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    grad_norm = torch.nn.utils.clip_grad_norm_(raw_model.parameters(), grad_clip)
   optimizer.step()
-
-  allocated = torch.cuda.max_memory_allocated() / (1024 ** 3)
-  reserved = torch.cuda.max_memory_reserved() / (1024 ** 3)
-  torch.cuda.reset_peak_memory_stats()
 
   torch.cuda.synchronize()
   t4 = time.time()
+  allocated = torch.cuda.max_memory_allocated() / (1024 ** 3)
+  reserved = torch.cuda.max_memory_reserved() / (1024 ** 3)
+  torch.cuda.reset_peak_memory_stats()
   tokens_per_second = token_num / (t4 - t0)
 
   logging.info(f"step:{i}/{total_steps}({i / total_steps * 100:.2f}%),"
@@ -197,7 +189,7 @@ for i in range(total_steps):
         f"train loss:{acc_loss},"
         f"val loss:{val_loss}")
   if i != 0 and i % checkpoint_interval == 0:
-      save_checkpoint(i, check_point_path, model, optimizer, acc_loss, GPTContext.to_dict(ctx))
+      save_checkpoint(i, check_point_path, raw_model, optimizer, acc_loss, GPTContext.to_dict(ctx))
 
 
-save_checkpoint(total_steps, check_point_path, model, optimizer, acc_loss, GPTContext.to_dict(ctx))
+save_checkpoint(total_steps, check_point_path, raw_model, optimizer, acc_loss, GPTContext.to_dict(ctx))
