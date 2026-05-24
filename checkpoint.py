@@ -42,7 +42,7 @@ class GPTContext:
         return ctx
 
 
-def save_checkpoint(step, ckpt_path, model, optimizer, train_loss,config_dict):
+def save_checkpoint(step, ckpt_path, raw_model, optimizer, train_loss,config_dict):
     if not os.path.isdir(ckpt_path):
         raise FileNotFoundError(f"Directory does not exist: {ckpt_path}")
 
@@ -54,7 +54,7 @@ def save_checkpoint(step, ckpt_path, model, optimizer, train_loss,config_dict):
 
     check_point = {
         'epoch':step,
-        'model_state':model._orig_mod.state_dict(),
+        'model_state':raw_model.state_dict(),
         'optimizer_state':optimizer.state_dict(),
         'train_loss': train_loss,
         'ctx_dict':config_dict

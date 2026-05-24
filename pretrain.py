@@ -20,9 +20,9 @@ torch.manual_seed(1337)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # data_path = "../fineweb10t/sample/2.5B_tokens/2.5B_tokens.bin"
-# data_path = "../fineweb10t/sample/10B.bin"
-data_path = "../fineweb10t/sample/100TToken/013_00000.bin" # test bin
-check_point_path = "./checkpoint/0425"
+data_path = "../fineweb10t/sample/10B.bin"
+# data_path = "../fineweb10t/sample/100TToken/013_00000.bin" # test bin
+check_point_path = "./checkpoint/0501"
 origin_token_arr = np.memmap(data_path, dtype=np.uint16, mode='r')
 origin_token_num = len(origin_token_arr)
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2", local_files_only=True)

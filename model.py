@@ -1,8 +1,13 @@
 import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+@dataclass
+class LLMOutput:
+    logits: torch.Tensor = None
 
 class LayerNorm(nn.Module):
 
@@ -115,17 +120,17 @@ class GPT2Model(nn.Module):
     elif isinstance(module, nn.Embedding):
         torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-  def forward(self,x):
-    B,T = x.shape
-    input_embedding = self.embedding(x)
-    pos_embedding = self.pos_embed(torch.arange(0, T, dtype=torch.long, device=x.device))
+  def forward(self,input_ids):
+    B,T = input_ids.shape
+    input_embedding = self.embedding(input_ids)
+    pos_embedding = self.pos_embed(torch.arange(0, T, dtype=torch.long, device=input_ids.device))
     hidden_state = self.dropout(input_embedding + pos_embedding)
 
     for decode_layer in self.layers:
       hidden_state = decode_layer(hidden_state)
     hidden_state = self.ln_f(hidden_state)
 
-    output = self.lm_head(hidden_state)
-    return output
+    logits = self.lm_head(hidden_state)
+    return LLMOutput(logits=logits)
 
 
