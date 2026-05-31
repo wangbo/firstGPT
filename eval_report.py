@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, GPT2TokenizerFast
 from datasets import load_dataset
 import torch
 import torch.nn.functional as F
@@ -33,7 +33,8 @@ eos_token_id = tokenizer.eos_token_id
 @torch.no_grad()
 def eval_ppl(token_list, model):
     block_size = 1024
-    stride = 512
+    # stride = 512
+    stride = 1024
     model.eval()
     losses = torch.tensor([], dtype=torch.float32)
     losses = losses.to(device)
@@ -45,8 +46,14 @@ def eval_ppl(token_list, model):
         
         input_ids = torch.tensor(batch, dtype=torch.long).unsqueeze(0)
         input_ids = input_ids.to(device)
-        labels = torch.tensor(token_list[i + 1 : i + 1 + block_size], 
+
+        label_begin_idx = i + 1
+        label_end_idx = i + 1 + block_size
+        labels = torch.tensor(token_list[label_begin_idx:label_end_idx],
                               dtype=torch.long).unsqueeze(0)
+        if label_end_idx >= len(token_list):
+            logging.info(f"end_idx={label_end_idx}, len_labels={len(labels)}")
+            break
         labels = labels.to(device)
 
         if i == 0:
@@ -60,7 +67,7 @@ def eval_ppl(token_list, model):
             reduction="none"
         )
 
-        if i == 0:
+        if i == 0 or stride == block_size:
             losses = torch.cat([losses, loss], dim=0)
         else:
             losses = torch.cat([losses, loss[stride:block_size]], dim=0)
@@ -85,6 +92,14 @@ def get_wikitext_token_list():
     logging.info(f"wiki text token size:{len(token_list)}")
     return token_list
 
+def get_val_token_list():
+    #begin idx = 9952940756, end idx = 9953989331
+    data_path = "../fineweb10t/sample/10B.bin"
+    origin_token_arr = np.memmap(data_path, dtype=np.uint16, mode='r')
+    val_token_arr = origin_token_arr[9952940756:9953989331 + 1]
+    logging.info(f"val token list:{len(val_token_arr)}")
+    return val_token_arr
+
 # ppl = eval_ppl(token_list, gpt2_raw_model)
 # logging.info(ppl)
 # raw gpt2的计算结果
@@ -97,6 +112,12 @@ my_gpt2_model = load_model_for_infer(GPT2Model,
 # ppl = eval_ppl(get_wikitext_token_list(), my_gpt2_model)
 # logging.info(ppl)
 # wiki text计算出的困惑度是 tensor(53.5905
+
+# 评估同分布数据集的困惑度
+# tensor(19.9250, 滑动窗口为512
+# 滑动窗口为1024时, 困惑度为21.1271, 求log时3.056
+ppl = eval_ppl(get_val_token_list(), my_gpt2_model)
+logging.info(ppl)
 
 # 评估时的精度是不是要和训练时保持一致
 @torch.no_grad()
@@ -122,9 +143,9 @@ def eval_hella_swag(model):
 
             logits = model(input_ids=input_ids).logits
             logits = logits[0][ctx_len - 1:-1]
-            probs = torch.log_softmax(logits, dim=-1) # 区别log_softmax/softmax
-            probs = probs[torch.arange(len(labels)), labels]
-            sample_scores.append(probs.mean().item())
+            log_probs = torch.log_softmax(logits, dim=-1) # 区别log_softmax/softmax
+            log_probs = log_probs[torch.arange(len(labels)), labels]
+            sample_scores.append(log_probs.mean().item())
         model_opt = sample_scores.index(max(sample_scores))
         if model_opt == correct_opt:
             correct_sample_num += 1
@@ -134,7 +155,7 @@ def eval_hella_swag(model):
 
 # gpt2原生：correct count:2967,rate: 29.55%
 # eval_hella_swag(gpt2_raw_model)
-eval_hella_swag(my_gpt2_model)
+# eval_hella_swag(my_gpt2_model)
 # 自己训练的10B：correct count:2893,rate: 28.81%
 
 def train_healthy_check():

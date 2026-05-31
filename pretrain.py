@@ -22,7 +22,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # data_path = "../fineweb10t/sample/2.5B_tokens/2.5B_tokens.bin"
 data_path = "../fineweb10t/sample/10B.bin"
 # data_path = "../fineweb10t/sample/100TToken/013_00000.bin" # test bin
-check_point_path = "./checkpoint/0501"
+check_point_path = "./checkpoint/0531"
 origin_token_arr = np.memmap(data_path, dtype=np.uint16, mode='r')
 origin_token_num = len(origin_token_arr)
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2", local_files_only=True)
@@ -80,6 +80,7 @@ ctx.n_layer = 12
 ctx.vocab_size = vocab_size
 ctx.dropout = 0.1
 ctx.bias = False
+ctx.enable_flash = True
 
 raw_model = GPT2Model(ctx).to(device)
 
@@ -158,7 +159,7 @@ for i in range(total_steps):
       token_num += xb.numel()
 
       with torch.autocast(device_type=device, dtype=torch.bfloat16):
-          output = model(xb)
+          output = model(xb).logits
           loss = F.cross_entropy(output.view(-1, vocab_size),  yb.view(-1))
       loss = loss / grad_accu_num
       acc_loss += loss.detach().item()
