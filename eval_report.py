@@ -9,6 +9,8 @@ import re
 import numpy as np
 from matplotlib.ticker import FormatStrFormatter
 
+from checkpoint import GPTContext
+from dataloader import SimpleDataloader
 from inference import load_model_for_infer
 from model import GPT2Model
 
@@ -24,8 +26,10 @@ model_name = "gpt2"
 device = "cuda"
 tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
 logging.info(f"vocab size:{tokenizer.vocab_size}")
-# gpt2_raw_model = AutoModelForCausalLM.from_pretrained(
-#     model_name,local_files_only=True).to(device)
+
+def get_gpt2_raw_model():
+    return AutoModelForCausalLM.from_pretrained(
+        model_name,local_files_only=True).to(device)
 
 eos_token_id = tokenizer.eos_token_id
 
@@ -106,9 +110,12 @@ def get_val_token_list():
 # 固定窗口计算出来的值 tensor(46.4863
 # 滑动窗口步长为512时计算出来的值 tensor(42.6428
 
-my_gpt2_model = load_model_for_infer(GPT2Model,
-    arg_path="checkpoint/0501",
-    arg_file_name="18983_time_1777921873.pt").to(device)
+def get_gpt2_model():
+    return load_model_for_infer(GPT2Model,
+        arg_path="checkpoint/0501",
+        arg_file_name="18983_time_1777921873.pt").to(device)
+
+# my_gpt2_model = get_gpt2_model()
 # ppl = eval_ppl(get_wikitext_token_list(), my_gpt2_model)
 # logging.info(ppl)
 # wiki text计算出的困惑度是 tensor(53.5905
@@ -116,8 +123,8 @@ my_gpt2_model = load_model_for_infer(GPT2Model,
 # 评估同分布数据集的困惑度
 # tensor(19.9250, 滑动窗口为512
 # 滑动窗口为1024时, 困惑度为21.1271, 求log时3.056
-ppl = eval_ppl(get_val_token_list(), my_gpt2_model)
-logging.info(ppl)
+# ppl = eval_ppl(get_val_token_list(), my_gpt2_model)
+# logging.info(ppl)
 
 # 评估时的精度是不是要和训练时保持一致
 @torch.no_grad()
@@ -165,6 +172,8 @@ def train_healthy_check():
     train_loss_arr = []
     val_step_arr = []
     val_loss_arr = []
+    gnorm_arr = []
+    lr_arr = []
     with open(train_log, "r", encoding="utf-8") as file:
         for line in file:
             if "val loss" in line:
@@ -177,38 +186,88 @@ def train_healthy_check():
                     # if step < 10000:
                     #     continue
                     val_loss = float(match.group(2))
-                    print(f"step:{step},val loss:{val_loss}")
+                    # print(f"step:{step},val loss:{val_loss}")
                     val_loss_arr.append(val_loss)
                     val_step_arr.append(step)
             else:
-                match = re.search(
-                    r"step:(\d+)/\d+.*?train loss:([\d\.eE+-]+)",
-                    line
-                )
+                pattern = r"step:(\d+)/\d+.*?train loss:([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),lr:([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),g_norm:([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"
+                match = re.search(pattern,line)
 
                 if match:
-                    step = float(match.group(1))
-                    if step < 10000:
-                        continue
-                    train_loss = match.group(2)
+                    step = int(match.group(1))
+                    train_loss = float(match.group(2))
+                    lr = float(match.group(3))
+                    g_norm = float(match.group(4))
+
                     train_step_arr.append(step)
                     train_loss_arr.append(train_loss)
+                    gnorm_arr.append(g_norm)
+                    lr_arr.append(lr)
+                    # print(f"step:{step},train loss:{train_loss}")
 
     train_step_arr = np.array(train_step_arr, dtype=np.int32)
     train_loss_arr = np.array(train_loss_arr, dtype=np.float32)
+    gnorm_arr = np.array(gnorm_arr, dtype=np.float32)
+    lr_arr = np.array(lr_arr, dtype=np.float32)
     val_loss_arr = np.array(val_loss_arr, dtype=np.int32)
     val_step_arr = np.array(val_step_arr, dtype=np.float32)
 
     plt.figure(figsize=(10, 6))
     plt.plot(train_step_arr, train_loss_arr, label="train")
-    plt.plot(val_step_arr, val_loss_arr, marker="o", label="val")
+    # plt.plot(val_step_arr, val_loss_arr, marker="o", label="val")
+    plt.plot(train_step_arr, gnorm_arr, marker="o", label="gnorm")
+    plt.plot(train_step_arr, lr_arr, marker="o", label="lr")
 
     plt.xlabel("Step")
-    plt.ylabel("Loss")
-    plt.title("Training and Validation Loss")
+    plt.ylabel("lr")
+    plt.title("lr")
     plt.legend()
     plt.grid()
 
     plt.show()
 
-# train_healthy_check()
+train_healthy_check()
+
+def check_val_loss(mode, dropout):
+    data_path = "../fineweb10t/sample/10B.bin"
+    origin_token_arr = np.memmap(data_path, dtype=np.uint16, mode='r')
+    val_data_loader = SimpleDataloader(origin_token_arr, 9952940756, 9953989331, 4,
+                                       1024)
+
+    checkpoint = torch.load("checkpoint/0501/18983_time_1777921873.pt", map_location=device)
+    ctx_dict = checkpoint['ctx_dict']
+    ctx = GPTContext.from_dict(ctx_dict)
+    ctx.dropout = dropout
+    model = GPT2Model(ctx)
+    model.load_state_dict(checkpoint['model_state'])
+
+    model = torch.compile(model.to(device), fullgraph=True)
+
+    if mode == "train":
+        model.train()
+    else:
+        model.eval()
+
+    losses = torch.zeros(256)
+    for i in range(256):
+        val_data = val_data_loader.next_batch()
+        x = val_data[0].to(device)
+        y = val_data[1].to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            output = model(x).logits
+            loss = F.cross_entropy(output.view(-1, 50257), y.view(-1))
+        losses[i] = loss.item()
+
+    logging.info(f"mode={mode},dropout={dropout},loss={losses.mean().item()}")
+
+# mode=train,dropout=0,loss=3.050893545150757
+# check_val_loss("train", 0)
+
+# mode=eval,dropout=0,loss=3.050893545150757
+# check_val_loss("eval", 0)
+
+# mode=train,dropout=0.1,loss=3.1256706714630127
+# check_val_loss("train", 0.1)
+
+# mode=eval,dropout=0.1,loss=3.050893545150757
+# check_val_loss("eval", 0.1)

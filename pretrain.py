@@ -124,7 +124,7 @@ def estimate_val_loss(model, data_loader, eval_iters):
         x = val_data[0].to(device)
         y = val_data[1].to(device)
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            output = model(x)
+            output = model(x).logits
             loss = F.cross_entropy(output.view(-1, vocab_size), y.view(-1))
         losses[i] = loss.item()
 
@@ -186,9 +186,9 @@ for i in range(total_steps):
   if i != 0 and i % eval_interval_step == 0:
       val_loss = estimate_val_loss(model, val_data_loader, eval_iters)
       logging.info(
-        f"step:{i}/{total_steps}({i / total_steps * 100:.2f}%),"
-        f"train loss:{acc_loss},"
-        f"val loss:{val_loss}")
+            f"step:{i}/{total_steps}({i / total_steps * 100:.2f}%),"
+            f"train loss:{acc_loss},"
+            f"val loss:{val_loss}")
   if i != 0 and i % checkpoint_interval == 0:
       save_checkpoint(i, check_point_path, raw_model, optimizer, acc_loss, GPTContext.to_dict(ctx))
 
